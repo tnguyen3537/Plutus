@@ -9,30 +9,68 @@ It's a personal project that also serves as a full stack learning iniative from 
 **In scope:** weekly data ingestion + storage, descriptive charts, then forecasting
 and sentiment, deployed as a web app.
 
+## Phasing
+
+- **Phase 1 — Descriptive (MVP):** FRED macro data → Postgres → export JSON to Supabase Storage → React line charts. One series first (e.g. Fed Funds Rate), then expand.
+- **Phase 2 — Expand descriptive:** Add more FRED series + `yfinance` stock indices. Add date filtering, multi-series charts.
+- **Phase 3 — Forecasting:** ARIMA/SARIMA via `statsmodels` on one series. Store forecasts in DB. Overlay on chart. Upgrade to Prophet only once ARIMA is understood.
+- **Phase 4 — Sentiment:** VADER on NewsAPI first. Wire the pipeline, then upgrade model quality with FinBERT if needed.
+
 ## Architecture
 Two independently deployable halves:
  
-- **`pipeline/`** (Python) — *produces* data: ingest → store → analyze →
+- **`backend/`** (Python) — *produces* data: ingest → store → analyze →
   forecast → score sentiment → export.
 - **`frontend/`** (React + Vite) — *consumes* data and does all filtering/charting
   client-side.
+
 **Data flow:** ingest from APIs → store in Postgres → analyze / forecast / sentiment →
-export static JSON (default) *or* serve directly via `supabase-js` + Row Level Security →
-frontend renders. No custom backend (FastAPI) until on-demand computation is needed.
+export static JSON to Supabase Storage → frontend fetches and renders. No custom backend
+(FastAPI) until on-demand computation is needed.
  
-The only contact point between the two halves is the data handoff (exported JSON, or
-Supabase reads), which keeps them independently deployable.
- 
-## Tech stack (please revise if needed)
-- **Storage:** PostgreSQL — Supabase (managed, free tier).
-- **Data sources:** FRED (`fredapi`) for macro; Twelve Data (`twelvedata`) for indices;
-  Alpha Vantage NEWS_SENTIMENT / NewsAPI / Reddit / GDELT for sentiment text.
-- **Analytics / ML:** pandas, NumPy; Prophet or scikit-learn (forecasting);
-  FinBERT (`ProsusAI/finbert`) or VADER (sentiment).
-- **Frontend:** React + Vite, TailwindCSS, Recharts or Plotly.js, Axios; `supabase-js` if
-  reading the DB directly.
-- **Deploy:** Vercel (frontend); GitHub Actions (weekly ETL); Cloud Run / Railway only if a
-  backend is added later.
+The only contact point between the two halves is the JSON data handoff (Supabase Storage
+public URL), which keeps them independently deployable.
+
+## Database schema 
+
+```sql
+CREATE TABLE series (
+  id        SERIAL PRIMARY KEY,
+  code      TEXT UNIQUE NOT NULL,  -- e.g. 'FEDFUNDS', 'SP500'
+  name      TEXT NOT NULL,
+  source    TEXT NOT NULL,         -- 'fred', 'yfinance'
+  frequency TEXT NOT NULL,
+  unit      TEXT                   -- '%', 'index', 'thousands'
+);
+
+CREATE TABLE observations (
+  id        BIGSERIAL PRIMARY KEY,
+  series_id INT REFERENCES series(id),
+  date      DATE NOT NULL,
+  value     NUMERIC,
+  UNIQUE (series_id, date)
+);
+
+CREATE TABLE forecasts (
+  id            BIGSERIAL PRIMARY KEY,
+  series_id     INT REFERENCES series(id),
+  run_date      DATE NOT NULL,
+  forecast_date DATE NOT NULL,
+  value         NUMERIC,
+  model         TEXT
+);
+```
+
+## Tech stack
+- **Storage:** PostgreSQL — Supabase (managed, free tier). Static JSON exports stored in Supabase Storage (free 1GB).
+- **Data sources:**
+  - Phase 1–2: FRED (`fredapi`) for macro; `yfinance` (no API key, free) for stock indices.
+  - Phase 4 only: NewsAPI for sentiment text. Reddit / GDELT as stretch options.
+- **Analytics / ML:**
+  - Forecasting: `statsmodels` ARIMA/SARIMA and scikit-learn (Phase 3 default); Prophet as a later upgrade once ARIMA is understood.
+  - Sentiment: VADER (Phase 4 default); FinBERT (`ProsusAI/finbert`) as a later upgrade.
+- **Frontend:** React + Vite, TailwindCSS, Recharts, Axios; `supabase-js` if reading the DB directly.
+- **Deploy:** Vercel (frontend); GitHub Actions (weekly ETL); Cloud Run / Railway only if a backend is added later.
 
 ## Key decisions & conventions
 - **Weekly cadence** for all data — deliberate, to keep storage and payloads small. Don't
@@ -40,5 +78,8 @@ Supabase reads), which keeps them independently deployable.
 - **Secrets are server-side only** — API keys and the Postgres `DATABASE_URL` live in
   `.env` / GitHub Actions secrets, never in frontend code. Only the Supabase anon key
   (guarded by RLS) may ship to the browser.
-- **Frontend data default is static JSON** (CDN-cached, free); direct `supabase-js` reads
-  are an option when live queries are wanted.
+- **Frontend data default is static JSON** served from Supabase Storage (CDN-cached, free).
+  Direct `supabase-js` reads are an option when live queries are needed.
+- **Schema first** — design and create DB tables before writing any pipeline code.
+- **One source at a time** — get FRED fully working before adding `yfinance`. Validate each
+  ingestion layer before layering the next.
